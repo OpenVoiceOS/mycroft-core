@@ -51,6 +51,10 @@ def create_enclosure(platform):
         LOG.info("Creating Mark II Enclosure")
         from mycroft.client.enclosure.mark2 import EnclosureMark2
         enclosure = EnclosureMark2()
+    elif platform == "OpenVoiceOS":
+        LOG.info("Creating OVOS Enclosure")
+        from mycroft.client.enclosure.mark2 import EnclosureMark2
+        enclosure = EnclosureMark2()
     else:
         LOG.info("Creating generic enclosure, platform='{}'".format(platform))
 

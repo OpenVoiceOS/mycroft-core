@@ -22,7 +22,6 @@ from mycroft.client.enclosure.base import Enclosure
 from mycroft.messagebus.message import Message
 from mycroft.util import create_daemon, connected
 from mycroft.util.log import LOG
-from mycroft.enclosure.hardware_enclosure import HardwareEnclosure
 
 import threading
 
