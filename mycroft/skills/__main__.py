@@ -123,10 +123,10 @@ class DevicePrimer(object):
 
     def _ensure_device_is_paired(self):
         """Determine if device is paired, if not automatically start pairing.
-
-        Pairing cannot be performed if there is no connection to the back end.
-        So skip pairing if the backend is down.
         """
+        if not self.is_paired:
+            LOG.info('Device not paired, invoking the pairing skill')
+            self.bus.emit(Message("mycroft.not.paired"))
 
     def _update_device_attributes_on_backend(self):
         """Communicate version information to the backend.
