@@ -15,73 +15,17 @@
 """Load, update and manage skills on this device."""
 import os
 from glob import glob
-from threading import Thread, Event, Lock
-from time import sleep, time, monotonic
+from threading import Thread, Event
+from time import sleep, monotonic
 
-from mycroft.api import is_paired
 from mycroft.enclosure.api import EnclosureAPI
 from mycroft.configuration import Configuration
 from mycroft.messagebus.message import Message
 from mycroft.util.log import LOG
-from .msm_wrapper import create_msm as msm_creator, build_msm_config
-from .settings import SkillSettingsDownloader
-from .skill_loader import SkillLoader
-from .skill_updater import SkillUpdater
+from mycroft.skills.settings import SkillSettingsDownloader
+from mycroft.skills.skill_loader import SkillLoader
 
 SKILL_MAIN_MODULE = '__init__.py'
-
-
-class UploadQueue:
-    """Queue for holding loaders with data that still needs to be uploaded.
-
-    This queue can be used during startup to capture all loaders
-    and then processing can be triggered at a later stage when the system is
-    connected to the backend.
-
-    After all queued settingsmeta has been processed and the queue is empty
-    the queue will set the self.started flag.
-    """
-    def __init__(self):
-        self._queue = []
-        self.started = False
-        self.lock = Lock()
-
-    def start(self):
-        """Start processing of the queue."""
-        self.started = True
-        self.send()
-
-    def stop(self):
-        """Stop the queue, and hinder any further transmissions."""
-        self.started = False
-
-    def send(self):
-        """Loop through all stored loaders triggering settingsmeta upload."""
-        with self.lock:
-            queue = self._queue
-            self._queue = []
-        if queue:
-            LOG.info('New Settings meta to upload.')
-            for loader in queue:
-                if self.started:
-                    loader.instance.settings_meta.upload()
-                else:
-                    break
-
-    def __len__(self):
-        return len(self._queue)
-
-    def put(self, loader):
-        """Append a skill loader to the queue.
-
-        If a loader is already present it's removed in favor of the new entry.
-        """
-        if self.started:
-            LOG.info('Updating settings meta during runtime...')
-        with self.lock:
-            # Remove existing loader
-            self._queue == [e for e in self._queue if e != loader]
-            self._queue.append(loader)
 
 
 def _shutdown_skill(instance):
@@ -108,7 +52,6 @@ def _shutdown_skill(instance):
 
 
 class SkillManager(Thread):
-    _msm = None
 
     def __init__(self, bus, watchdog=None):
         """Constructor
@@ -124,7 +67,9 @@ class SkillManager(Thread):
         self._stop_event = Event()
         self._connected_event = Event()
         self.config = Configuration.get()
-        self.upload_queue = UploadQueue()
+        # TODO change this once XDG PR is submitted
+        self.skills_directory = os.path.join(
+            self.config["data_dir"], self.config["skills"]["msm"]["directory"])
 
         self.skill_loaders = {}
         self.enclosure = EnclosureAPI(bus)
@@ -136,7 +81,6 @@ class SkillManager(Thread):
         self._alive_status = False  # True after priority skills has loaded
         self._loaded_status = False  # True after all skills has loaded
 
-        self.skill_updater = SkillUpdater()
         self._define_message_bus_events()
         self.daemon = True
 
@@ -152,7 +96,6 @@ class SkillManager(Thread):
         )
 
         # Update upon request
-        self.bus.on('skillmanager.update', self.schedule_now)
         self.bus.on('skillmanager.list', self.send_skill_list)
         self.bus.on('skillmanager.deactivate', self.deactivate_skill)
         self.bus.on('skillmanager.keep', self.deactivate_except)
@@ -167,30 +110,7 @@ class SkillManager(Thread):
     def skills_config(self):
         return self.config['skills']
 
-    @property
-    def msm(self):
-        if self._msm is None:
-            msm_config = build_msm_config(self.config)
-            self._msm = msm_creator(msm_config)
-
-        return self._msm
-
-    @staticmethod
-    def create_msm():
-        LOG.debug('instantiating msm via static method...')
-        msm_config = build_msm_config(Configuration.get())
-        msm_instance = msm_creator(msm_config)
-
-        return msm_instance
-
-    def schedule_now(self, _):
-        self.skill_updater.next_download = time() - 1
-
     def _start_settings_update(self):
-        LOG.info('Start settings update')
-        self.skill_updater.post_manifest(reload_skills_manifest=True)
-        self.upload_queue.start()
-        LOG.info('All settings meta has been processed or upload has started')
         self.settings_downloader.download()
         LOG.info('Skill settings downloading has started')
 
@@ -199,42 +119,18 @@ class SkillManager(Thread):
         self._start_settings_update()
 
     def load_priority(self):
-        skills = {skill.name: skill for skill in self.msm.all_skills}
         priority_skills = self.skills_config.get("priority_skills", [])
-        for skill_name in priority_skills:
-            skill = skills.get(skill_name)
-            if skill is not None:
-                if not skill.is_local:
-                    try:
-                        self.msm.install(skill)
-                    except Exception:
-                        log_msg = 'Downloading priority skill: {} failed'
-                        LOG.exception(log_msg.format(skill_name))
-                        continue
-                loader = self._load_skill(skill.path)
-                if loader:
-                    self.upload_queue.put(loader)
-            else:
-                LOG.error(
-                    'Priority skill {} can\'t be found'.format(skill_name)
-                )
-
+        for skill_id in priority_skills:
+            skill_dir = os.path.join(self.skills_directory, skill_id)
+            if skill_dir not in self.skill_loaders:
+                LOG.info(f"Loading priority skill: {skill_id}")
+                self._load_skill(skill_dir)
         self._alive_status = True
 
     def run(self):
         """Load skills and update periodically from disk and internet."""
-        self._remove_git_locks()
         self._connected_event.wait()
-        if (not self.skill_updater.defaults_installed() and
-                self.skills_config["auto_update"]):
-            LOG.info('Not all default skills are installed, '
-                     'performing skill update...')
-            self.skill_updater.update_skills()
         self._load_on_startup()
-
-        # Sync backend and skills.
-        if is_paired() and not self.upload_queue.started:
-            self._start_settings_update()
 
         # Scan the file folder that contains Skills.  If a Skill is updated,
         # unload the existing version from memory and reload from the disk.
@@ -243,13 +139,6 @@ class SkillManager(Thread):
                 self._unload_removed_skills()
                 self._reload_modified_skills()
                 self._load_new_skills()
-                self._update_skills()
-                if (is_paired() and self.upload_queue.started and
-                        len(self.upload_queue) > 0):
-                    self.msm.clear_cache()
-                    self.skill_updater.post_manifest()
-                    self.upload_queue.send()
-
                 self._watchdog()
                 sleep(2)  # Pause briefly before beginning next scan
             except Exception:
@@ -257,12 +146,6 @@ class SkillManager(Thread):
                               'and the skill manager loop safety harness was '
                               'hit.')
                 sleep(30)
-
-    def _remove_git_locks(self):
-        """If git gets killed from an abrupt shutdown it leaves lock files."""
-        for i in glob(os.path.join(self.msm.skills_dir, '*/.git/index.lock')):
-            LOG.warning('Found and removed git lock file: ' + i)
-            os.remove(i)
 
     def _load_on_startup(self):
         """Handle initial skill load."""
@@ -278,9 +161,7 @@ class SkillManager(Thread):
             try:
                 skill_loader = self.skill_loaders.get(skill_dir)
                 if skill_loader is not None and skill_loader.reload_needed():
-                    # If reload succeed add settingsmeta to upload queue
-                    if skill_loader.reload():
-                        self.upload_queue.put(skill_loader)
+                    skill_loader.reload()
             except Exception:
                 LOG.exception('Unhandled exception occured while '
                               'reloading {}'.format(skill_dir))
@@ -289,9 +170,7 @@ class SkillManager(Thread):
         """Handle load of skills installed since startup."""
         for skill_dir in self._get_skill_directories():
             if skill_dir not in self.skill_loaders:
-                loader = self._load_skill(skill_dir)
-                if loader:
-                    self.upload_queue.put(loader)
+                self._load_skill(skill_dir)
 
     def _load_skill(self, skill_directory):
         skill_loader = SkillLoader(self.bus, skill_directory)
@@ -306,7 +185,7 @@ class SkillManager(Thread):
         return skill_loader if load_status else None
 
     def _get_skill_directories(self):
-        skill_glob = glob(os.path.join(self.msm.skills_dir, '*/'))
+        skill_glob = glob(os.path.join(self.skills_directory, '*/'))
 
         skill_directories = []
         for skill_dir in skill_glob:
@@ -334,20 +213,6 @@ class SkillManager(Thread):
             except Exception:
                 LOG.exception('Failed to shutdown skill ' + skill.id)
             del self.skill_loaders[skill_dir]
-
-        # If skills were removed make sure to update the manifest on the
-        # mycroft backend.
-        if removed_skills:
-            self.skill_updater.post_manifest(reload_skills_manifest=True)
-
-    def _update_skills(self):
-        """Update skills once an hour if update is enabled"""
-        do_skill_update = (
-            time() >= self.skill_updater.next_download and
-            self.skills_config["auto_update"]
-        )
-        if do_skill_update:
-            self.skill_updater.update_skills()
 
     def is_alive(self, message=None):
         """Respond to is_alive status request."""
@@ -410,7 +275,6 @@ class SkillManager(Thread):
         """Tell the manager to shutdown."""
         self._stop_event.set()
         self.settings_downloader.stop_downloading()
-        self.upload_queue.stop()
 
         # Do a clean shutdown of all skills
         for skill_loader in self.skill_loaders.values():
@@ -436,8 +300,13 @@ class SkillManager(Thread):
                 try:
                     utterances = message.data['utterances']
                     lang = message.data['lang']
-                    result = skill_loader.instance.converse(utterances, lang)
-                    self._emit_converse_response(result, message, skill_loader)
+                    converse = skill_loader.instance.converse
+                    handled = converse(utterances, lang)
+                    if not handled:
+                        handled = skill_loader.instance.converse(utterances,
+                                                                 lang)
+                    self._emit_converse_response(handled, message,
+                                                 skill_loader)
                 except Exception:
                     error_message = 'exception in converse method'
                     LOG.exception(error_message)
@@ -452,6 +321,11 @@ class SkillManager(Thread):
     def _emit_converse_error(self, message, skill_id, error_msg):
         """Emit a message reporting the error back to the intent service."""
         reply = message.reply('skill.converse.response',
+                              data=dict(skill_id=skill_id, error=error_msg))
+        self.bus.emit(reply)
+        # Also emit the old error message to keep compatibility and to
+        # inform any listeners connected to bus
+        reply = message.reply('skill.converse.error',
                               data=dict(skill_id=skill_id, error=error_msg))
         self.bus.emit(reply)
 

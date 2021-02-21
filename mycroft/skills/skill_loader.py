@@ -25,7 +25,6 @@ from mycroft.messagebus import Message
 from mycroft.skills.settings import save_settings
 from mycroft.util.log import LOG
 
-from .settings import SettingsMetaUploader
 
 SKILL_MAIN_MODULE = '__init__.py'
 
@@ -247,14 +246,7 @@ class SkillLoader:
 
         self.last_loaded = time()
         self._communicate_load_status()
-        if self.loaded:
-            self._prepare_settings_meta()
         return self.loaded
-
-    def _prepare_settings_meta(self):
-        settings_meta = SettingsMetaUploader(self.skill_directory,
-                                             self.instance.name)
-        self.instance.settings_meta = settings_meta
 
     def _prepare_for_load(self):
         self.load_attempted = True
