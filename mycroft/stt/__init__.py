@@ -285,7 +285,7 @@ def requires_pairing(func):
             if e.response.status_code == 401:
                 LOG.warning('Access Denied at mycroft.ai')
                 # phrase to start the pairing process
-                return 'pair my device'
+                return None
             else:
                 raise
     return wrapper
