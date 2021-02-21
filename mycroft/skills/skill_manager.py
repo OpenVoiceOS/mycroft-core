@@ -300,13 +300,8 @@ class SkillManager(Thread):
                 try:
                     utterances = message.data['utterances']
                     lang = message.data['lang']
-                    converse = skill_loader.instance.converse
-                    handled = converse(utterances, lang)
-                    if not handled:
-                        handled = skill_loader.instance.converse(utterances,
-                                                                 lang)
-                    self._emit_converse_response(handled, message,
-                                                 skill_loader)
+                    result = skill_loader.instance.converse(utterances, lang)
+                    self._emit_converse_response(result, message, skill_loader)
                 except Exception:
                     error_message = 'exception in converse method'
                     LOG.exception(error_message)
@@ -321,11 +316,6 @@ class SkillManager(Thread):
     def _emit_converse_error(self, message, skill_id, error_msg):
         """Emit a message reporting the error back to the intent service."""
         reply = message.reply('skill.converse.response',
-                              data=dict(skill_id=skill_id, error=error_msg))
-        self.bus.emit(reply)
-        # Also emit the old error message to keep compatibility and to
-        # inform any listeners connected to bus
-        reply = message.reply('skill.converse.error',
                               data=dict(skill_id=skill_id, error=error_msg))
         self.bus.emit(reply)
 
